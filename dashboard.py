@@ -5,9 +5,17 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+import utils
+
 
 DB_FILE = "expenses.db"
 MONTH_ORDER = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+INTERNAL_CATEGORIES = getattr(
+    utils,
+    "INTERNAL_CATEGORIES",
+    {"Credit Card Payments", "Internal Transfers", "Personal Transfers", "Payments"},
+)
+EARNING_CATEGORIES = getattr(utils, "EARNING_CATEGORIES", {"Income", "PF Withdrawals", "Tax Refunds"})
 
 
 def format_inr(amount):
@@ -143,10 +151,52 @@ def credit_rows(frame):
     return frame[frame["txn_type"] == "CREDIT"].copy()
 
 
+def external_rows(frame):
+    return frame[~frame["Is_Internal"]].copy()
+
+
+def internal_rows(frame):
+    return frame[frame["Is_Internal"]].copy()
+
+
+def spend_impact(row):
+    if row["category"] in INTERNAL_CATEGORIES:
+        return "Internal / Excluded"
+    if row["txn_type"] == "DEBIT":
+        return "Actual Spend"
+    if row["category"] in EARNING_CATEGORIES:
+        return "Earnings / Inflow"
+    return "Credit / Refund"
+
+
 def group_amount(frame, group_cols):
     data = frame.groupby(group_cols, dropna=False)["amount"].sum().reset_index()
     data["inr_text"] = data["amount"].apply(format_inr)
     return data
+
+
+def render_metric_rows(metrics, columns=3):
+    """Render metrics in wider rows so long INR values do not get ellipsized."""
+    for start in range(0, len(metrics), columns):
+        row = metrics[start:start + columns]
+        cols = st.columns(columns)
+        for col, metric in zip(cols, row):
+            label, value, *rest = metric
+            delta = rest[0] if rest else None
+            col.metric(label, value, delta=delta)
+
+
+def transaction_column_config():
+    return {
+        "txn_datetime": st.column_config.TextColumn("Date", width="small"),
+        "bank_name": st.column_config.TextColumn("Bank", width="small"),
+        "card_name": st.column_config.TextColumn("Account / Card", width="medium"),
+        "txn_type": st.column_config.TextColumn("Type", width="small"),
+        "category": st.column_config.TextColumn("Category", width="medium"),
+        "Spend_Impact": st.column_config.TextColumn("Spend Impact", width="medium"),
+        "description": st.column_config.TextColumn("Description", width="large"),
+        "amount": st.column_config.TextColumn("Amount", width="medium"),
+    }
 
 
 @st.cache_data
@@ -167,11 +217,31 @@ def load_data():
         lambda row: row["amount"] if row["txn_type"] == "DEBIT" else -row["amount"],
         axis=1,
     )
+    df["Is_Internal"] = df["category"].isin(INTERNAL_CATEGORIES)
+    df["Spend_Impact"] = df.apply(spend_impact, axis=1)
     return df
 
 
 st.set_page_config(page_title="Personal Finance Dashboard", page_icon="💳", layout="wide")
 st.title("Personal Finance Dashboard")
+
+st.markdown(
+    """
+    <style>
+    [data-testid="stMetricValue"] {
+        font-size: 1.35rem;
+        line-height: 1.2;
+        white-space: normal;
+        overflow: visible;
+        text-overflow: clip;
+    }
+    [data-testid="stMetricDelta"] {
+        white-space: normal;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 df = load_data()
 
@@ -223,55 +293,85 @@ filtered_df = df[
     & (df["txn_datetime"].dt.date <= range_end)
 ].copy()
 
-spend_df = debit_rows(filtered_df)
-credit_df = credit_rows(filtered_df)
+analysis_df = external_rows(filtered_df)
+internal_df = internal_rows(filtered_df)
+spend_df = debit_rows(analysis_df)
+credit_df = credit_rows(analysis_df)
+income_df = credit_df[credit_df["category"].isin(EARNING_CATEGORIES)].copy()
 month_df = filtered_df[filtered_df["Year-Month"] == selected_month].copy()
-month_spend_df = debit_rows(month_df)
-month_credit_df = credit_rows(month_df)
+month_analysis_df = analysis_df[analysis_df["Year-Month"] == selected_month].copy()
+month_internal_df = internal_df[internal_df["Year-Month"] == selected_month].copy()
+month_spend_df = debit_rows(month_analysis_df)
+month_credit_df = credit_rows(month_analysis_df)
+month_income_df = income_df[income_df["Year-Month"] == selected_month].copy()
 year_df = filtered_df[filtered_df["Year"] == selected_year].copy()
-year_spend_df = debit_rows(year_df)
-year_credit_df = credit_rows(year_df)
+year_analysis_df = analysis_df[analysis_df["Year"] == selected_year].copy()
+year_internal_df = internal_df[internal_df["Year"] == selected_year].copy()
+year_spend_df = debit_rows(year_analysis_df)
+year_credit_df = credit_rows(year_analysis_df)
+year_income_df = income_df[income_df["Year"] == selected_year].copy()
 
 total_spend = spend_df["amount"].sum()
 total_credits = credit_df["amount"].sum()
+total_income = income_df["amount"].sum()
+total_internal = debit_rows(internal_df)["amount"].sum()
 net_outflow = total_spend - total_credits
 
 month_spend = month_spend_df["amount"].sum()
 month_credits = month_credit_df["amount"].sum()
+month_income = month_income_df["amount"].sum()
+month_internal = debit_rows(month_internal_df)["amount"].sum()
 month_net = month_spend - month_credits
 year_spend = year_spend_df["amount"].sum()
 year_credits = year_credit_df["amount"].sum()
+year_income = year_income_df["amount"].sum()
+year_internal = debit_rows(year_internal_df)["amount"].sum()
 year_net = year_spend - year_credits
 
 previous_month = (pd.Period(selected_month) - 1).strftime("%Y-%m")
-prev_spend = debit_rows(filtered_df[filtered_df["Year-Month"] == previous_month])["amount"].sum()
+prev_spend = debit_rows(analysis_df[analysis_df["Year-Month"] == previous_month])["amount"].sum()
 spend_delta = month_spend - prev_spend
+prev_income = income_df[income_df["Year-Month"] == previous_month]["amount"].sum()
+income_delta = month_income - prev_income
 previous_year = str(int(selected_year) - 1)
-prev_year_spend = debit_rows(filtered_df[filtered_df["Year"] == previous_year])["amount"].sum()
+prev_year_spend = debit_rows(analysis_df[analysis_df["Year"] == previous_year])["amount"].sum()
 year_spend_delta = year_spend - prev_year_spend
+prev_year_income = income_df[income_df["Year"] == previous_year]["amount"].sum()
+year_income_delta = year_income - prev_year_income
 
 st.subheader("Selected Scope")
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Total Spend", format_inr(total_spend))
-m2.metric("Payments and Credits", format_inr(total_credits))
-m3.metric("Net Outflow", format_inr(net_outflow))
-m4.metric("Transactions", f"{len(filtered_df):,}")
+render_metric_rows(
+    [
+        ("Actual Spend", format_inr(total_spend)),
+        ("Earnings", format_inr(total_income)),
+        ("Credits and Income", format_inr(total_credits)),
+        ("Net Outflow", format_inr(net_outflow)),
+        ("Internal Payments", format_inr(total_internal)),
+        ("Transactions", f"{len(filtered_df):,}"),
+    ]
+)
 
 st.divider()
 
 st.subheader(f"Month Snapshot: {selected_month}")
-mm1, mm2, mm3, mm4, mm5 = st.columns(5)
-mm1.metric("Month Spend", format_inr(month_spend), delta=format_inr(spend_delta))
-mm2.metric("Month Credits", format_inr(month_credits))
-mm3.metric("Month Net", format_inr(month_net))
-mm4.metric("Active Cards", f"{month_df['card_name'].nunique():,}")
-mm5.metric("Transactions", f"{len(month_df):,}")
+render_metric_rows(
+    [
+        ("Month Spend", format_inr(month_spend), format_inr(spend_delta)),
+        ("Month Earnings", format_inr(month_income), format_inr(income_delta)),
+        ("Month Credits", format_inr(month_credits)),
+        ("Month Net", format_inr(month_net)),
+        ("Internal Payments", format_inr(month_internal)),
+        ("Active Accounts", f"{month_df['card_name'].nunique():,}"),
+        ("Transactions", f"{len(month_df):,}"),
+    ]
+)
 
-tab_overview, tab_month, tab_yearly, tab_trends, tab_mix, tab_merchants, tab_transactions = st.tabs(
+tab_overview, tab_month, tab_yearly, tab_earnings, tab_trends, tab_mix, tab_merchants, tab_transactions = st.tabs(
     [
         "Overview",
         "Month Drilldown",
         "Yearly",
+        "Earnings",
         "Trends",
         "Category and Card Mix",
         "Merchants",
@@ -283,8 +383,8 @@ with tab_overview:
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        st.subheader("Overall Volume Over Time")
-        trend_data = filtered_df.groupby(["Year-Month", "txn_type"])["amount"].sum().reset_index()
+        st.subheader("Actual Volume Over Time")
+        trend_data = analysis_df.groupby(["Year-Month", "txn_type"])["amount"].sum().reset_index()
         trend_data["inr_text"] = trend_data["amount"].apply(format_inr)
         if trend_data.empty:
             st.info("No transactions for the selected filters.")
@@ -304,8 +404,8 @@ with tab_overview:
             st.plotly_chart(polish_chart(fig, 430), width="stretch")
 
     with col2:
-        st.subheader("Card-Wise Breakdown")
-        card_data = group_amount(filtered_df, ["card_name"]).sort_values("amount", ascending=False)
+        st.subheader("Actual Spend by Card")
+        card_data = group_amount(spend_df, ["card_name"]).sort_values("amount", ascending=False)
         if card_data.empty:
             st.info("No card data for the selected filters.")
         else:
@@ -372,9 +472,22 @@ with tab_overview:
     overview_table["amount"] = overview_table["amount"].apply(format_inr)
     overview_table["txn_datetime"] = overview_table["txn_datetime"].dt.strftime("%Y-%m-%d")
     st.dataframe(
-        overview_table[["txn_datetime", "bank_name", "card_name", "description", "amount", "txn_type", "category"]],
+        overview_table[
+            [
+                "txn_datetime",
+                "bank_name",
+                "card_name",
+                "description",
+                "amount",
+                "txn_type",
+                "category",
+                "Spend_Impact",
+            ]
+        ],
         hide_index=True,
         height=420,
+        width="stretch",
+        column_config=transaction_column_config(),
     )
 
 with tab_month:
@@ -461,18 +574,23 @@ with tab_month:
 
 with tab_yearly:
     st.subheader(f"Year Snapshot: {selected_year}")
-    yy1, yy2, yy3, yy4, yy5 = st.columns(5)
-    yy1.metric("Year Spend", format_inr(year_spend), delta=format_inr(year_spend_delta))
-    yy2.metric("Year Credits", format_inr(year_credits))
-    yy3.metric("Year Net", format_inr(year_net))
-    yy4.metric("Active Cards", f"{year_df['card_name'].nunique():,}")
-    yy5.metric("Transactions", f"{len(year_df):,}")
+    render_metric_rows(
+        [
+            ("Year Spend", format_inr(year_spend), format_inr(year_spend_delta)),
+            ("Year Earnings", format_inr(year_income), format_inr(year_income_delta)),
+            ("Year Credits", format_inr(year_credits)),
+            ("Year Net", format_inr(year_net)),
+            ("Internal Payments", format_inr(year_internal)),
+            ("Active Accounts", f"{year_df['card_name'].nunique():,}"),
+            ("Transactions", f"{len(year_df):,}"),
+        ]
+    )
 
     col1, col2 = st.columns([1, 1])
 
     with col1:
         st.subheader("Yearly Spend vs Credits")
-        annual = filtered_df.groupby(["Year", "txn_type"])["amount"].sum().reset_index()
+        annual = analysis_df.groupby(["Year", "txn_type"])["amount"].sum().reset_index()
         annual["inr_text"] = annual["amount"].apply(format_inr)
         if annual.empty:
             st.info("No yearly data for the selected filters.")
@@ -493,7 +611,7 @@ with tab_yearly:
 
     with col2:
         st.subheader("Net Outflow by Year")
-        annual_net = filtered_df.groupby("Year")["Signed_Amount"].sum().reset_index()
+        annual_net = analysis_df.groupby("Year")["Signed_Amount"].sum().reset_index()
         annual_net["inr_text"] = annual_net["Signed_Amount"].apply(format_inr)
         if annual_net.empty:
             st.info("No yearly net data for the selected filters.")
@@ -599,31 +717,180 @@ with tab_yearly:
             st.plotly_chart(polish_chart(fig, 430), width="stretch")
 
     st.subheader("Yearly Summary Table")
-    annual_summary = filtered_df.pivot_table(
-        index="Year",
-        columns="txn_type",
-        values="amount",
-        aggfunc="sum",
-        fill_value=0,
-    ).reset_index()
-    if "DEBIT" not in annual_summary:
-        annual_summary["DEBIT"] = 0
-    if "CREDIT" not in annual_summary:
-        annual_summary["CREDIT"] = 0
-    annual_summary["Net Outflow"] = annual_summary["DEBIT"] - annual_summary["CREDIT"]
-    annual_summary["Transactions"] = filtered_df.groupby("Year")["id"].count().reindex(annual_summary["Year"]).values
-    annual_summary = annual_summary.sort_values("Year", ascending=False)
-    annual_summary["DEBIT"] = annual_summary["DEBIT"].apply(format_inr)
-    annual_summary["CREDIT"] = annual_summary["CREDIT"].apply(format_inr)
-    annual_summary["Net Outflow"] = annual_summary["Net Outflow"].apply(format_inr)
-    st.dataframe(annual_summary, hide_index=True, height=260)
+    if filtered_df.empty:
+        st.info("No yearly summary data for the selected filters.")
+    else:
+        annual_summary = analysis_df.pivot_table(
+            index="Year",
+            columns="txn_type",
+            values="amount",
+            aggfunc="sum",
+            fill_value=0,
+        ).reset_index()
+        if annual_summary.empty:
+            annual_summary = pd.DataFrame({"Year": sorted(filtered_df["Year"].unique())})
+        if "DEBIT" not in annual_summary:
+            annual_summary["DEBIT"] = 0
+        if "CREDIT" not in annual_summary:
+            annual_summary["CREDIT"] = 0
+
+        internal_by_year = debit_rows(internal_df).groupby("Year")["amount"].sum()
+        annual_summary["Internal Payments"] = annual_summary["Year"].map(internal_by_year).fillna(0)
+        annual_summary["Net Outflow"] = annual_summary["DEBIT"] - annual_summary["CREDIT"]
+        annual_summary["Transactions"] = filtered_df.groupby("Year")["id"].count().reindex(annual_summary["Year"]).values
+        annual_summary = annual_summary.sort_values("Year", ascending=False)
+        annual_summary = annual_summary.rename(columns={"DEBIT": "Actual Spend", "CREDIT": "Credits and Income"})
+        for column in ["Actual Spend", "Credits and Income", "Internal Payments", "Net Outflow"]:
+            annual_summary[column] = annual_summary[column].apply(format_inr)
+        st.dataframe(
+            annual_summary,
+            hide_index=True,
+            height=260,
+            width="stretch",
+            column_config={
+                "Actual Spend": st.column_config.TextColumn("Actual Spend", width="medium"),
+                "Credits and Income": st.column_config.TextColumn("Credits and Income", width="medium"),
+                "Internal Payments": st.column_config.TextColumn("Internal Payments", width="medium"),
+                "Net Outflow": st.column_config.TextColumn("Net Outflow", width="medium"),
+            },
+        )
+
+with tab_earnings:
+    st.subheader("Earnings Snapshot")
+    render_metric_rows(
+        [
+            ("Total Earnings", format_inr(total_income)),
+            (f"{selected_month} Earnings", format_inr(month_income), format_inr(income_delta)),
+            (f"{selected_year} Earnings", format_inr(year_income), format_inr(year_income_delta)),
+            ("Earnings Transactions", f"{len(income_df):,}"),
+        ]
+    )
+
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        st.subheader("Month-by-Month Earnings")
+        monthly_income = group_amount(income_df, ["Year-Month", "category"]).sort_values("Year-Month")
+        if monthly_income.empty:
+            st.info("No income transactions for the selected filters.")
+        else:
+            fig = px.bar(
+                monthly_income,
+                x="Year-Month",
+                y="amount",
+                color="category",
+                barmode="stack",
+                custom_data=["inr_text"],
+                labels={"amount": "Earnings", "Year-Month": "Month", "category": "Type"},
+            )
+            fig.update_traces(hovertemplate="Month: %{x}<br>Earnings: %{customdata[0]}<extra></extra>")
+            fig = apply_inr_axis(fig, monthly_income["amount"].max(), "y")
+            st.plotly_chart(polish_chart(fig, 430), width="stretch")
+
+    with col2:
+        st.subheader("Yearly Earnings")
+        yearly_income = group_amount(income_df, ["Year", "category"]).sort_values("Year")
+        if yearly_income.empty:
+            st.info("No yearly earnings to show.")
+        else:
+            fig = px.bar(
+                yearly_income,
+                x="Year",
+                y="amount",
+                color="category",
+                barmode="stack",
+                custom_data=["inr_text"],
+                labels={"amount": "Earnings", "category": "Type"},
+            )
+            fig.update_traces(hovertemplate="Year: %{x}<br>Earnings: %{customdata[0]}<extra></extra>")
+            fig = apply_inr_axis(fig, yearly_income["amount"].max(), "y")
+            st.plotly_chart(polish_chart(fig, 430), width="stretch")
+
+    col3, col4 = st.columns([1, 1])
+
+    with col3:
+        st.subheader(f"{selected_year} Earnings by Month")
+        selected_year_income = (
+            year_income_df.groupby(["Month", "Month_Name", "category"])["amount"].sum().reset_index()
+        )
+        selected_year_income = selected_year_income.sort_values("Month")
+        selected_year_income["inr_text"] = selected_year_income["amount"].apply(format_inr)
+        if selected_year_income.empty:
+            st.info("No income for the selected year.")
+        else:
+            fig = px.bar(
+                selected_year_income,
+                x="Month_Name",
+                y="amount",
+                color="category",
+                barmode="stack",
+                custom_data=["inr_text"],
+                labels={"Month_Name": "Month", "amount": "Earnings", "category": "Type"},
+            )
+            fig.update_xaxes(categoryorder="array", categoryarray=MONTH_ORDER)
+            fig.update_traces(hovertemplate="Month: %{x}<br>Earnings: %{customdata[0]}<extra></extra>")
+            fig = apply_inr_axis(fig, selected_year_income["amount"].max(), "y")
+            st.plotly_chart(polish_chart(fig, 390), width="stretch")
+
+    with col4:
+        st.subheader("Earnings by Type")
+        income_types = group_amount(income_df, ["category"]).sort_values("amount", ascending=True)
+        if income_types.empty:
+            st.info("No earnings types to show.")
+        else:
+            fig = px.bar(
+                income_types,
+                x="amount",
+                y="category",
+                orientation="h",
+                color="category",
+                custom_data=["inr_text"],
+                labels={"amount": "Earnings", "category": "Type"},
+            )
+            fig.update_traces(hovertemplate="Type: %{y}<br>Earnings: %{customdata[0]}<extra></extra>")
+            fig.update_layout(showlegend=False)
+            fig = apply_inr_axis(fig, income_types["amount"].max(), "x")
+            st.plotly_chart(polish_chart(fig, 390), width="stretch")
+
+    st.subheader("Earnings Source Accounts")
+    income_accounts = group_amount(income_df, ["card_name", "category"]).sort_values("amount", ascending=True)
+    if income_accounts.empty:
+        st.info("No income source accounts to show.")
+    else:
+        fig = px.bar(
+            income_accounts,
+            x="amount",
+            y="card_name",
+            orientation="h",
+            color="category",
+            custom_data=["inr_text"],
+            labels={"amount": "Earnings", "card_name": "Account", "category": "Type"},
+        )
+        fig.update_traces(hovertemplate="Account: %{y}<br>Earnings: %{customdata[0]}<extra></extra>")
+        fig = apply_inr_axis(fig, income_accounts["amount"].max(), "x")
+        st.plotly_chart(polish_chart(fig, 360), width="stretch")
+
+    st.subheader("Earnings Transactions")
+    income_table = income_df.sort_values("txn_datetime", ascending=False).copy()
+    if income_table.empty:
+        st.info("No earnings transactions for the selected filters.")
+    else:
+        income_table["amount"] = income_table["amount"].apply(format_inr)
+        income_table["txn_datetime"] = income_table["txn_datetime"].dt.strftime("%Y-%m-%d")
+        st.dataframe(
+            income_table[["txn_datetime", "bank_name", "card_name", "description", "amount", "category"]],
+            hide_index=True,
+            height=360,
+            width="stretch",
+            column_config=transaction_column_config(),
+        )
 
 with tab_trends:
     col1, col2 = st.columns([2, 1])
 
     with col1:
         st.subheader("Monthly Spend and Credits")
-        monthly = filtered_df.groupby(["Year-Month", "txn_type"])["amount"].sum().reset_index()
+        monthly = analysis_df.groupby(["Year-Month", "txn_type"])["amount"].sum().reset_index()
         monthly["inr_text"] = monthly["amount"].apply(format_inr)
         fig = px.bar(
             monthly,
@@ -641,7 +908,7 @@ with tab_trends:
 
     with col2:
         st.subheader("Net Outflow by Month")
-        net_monthly = filtered_df.groupby("Year-Month")["Signed_Amount"].sum().reset_index()
+        net_monthly = analysis_df.groupby("Year-Month")["Signed_Amount"].sum().reset_index()
         net_monthly["inr_text"] = net_monthly["Signed_Amount"].apply(format_inr)
         fig = px.bar(
             net_monthly,
@@ -851,9 +1118,11 @@ with tab_transactions:
         largest["amount"] = largest["amount"].apply(format_inr)
         largest["txn_datetime"] = largest["txn_datetime"].dt.strftime("%Y-%m-%d")
         st.dataframe(
-            largest[["txn_datetime", "txn_type", "card_name", "category", "description", "amount"]],
+            largest[["txn_datetime", "txn_type", "card_name", "category", "Spend_Impact", "description", "amount"]],
             hide_index=True,
             height=520,
+            width="stretch",
+            column_config=transaction_column_config(),
         )
 
     with col2:
@@ -862,7 +1131,9 @@ with tab_transactions:
         month_table["amount"] = month_table["amount"].apply(format_inr)
         month_table["txn_datetime"] = month_table["txn_datetime"].dt.strftime("%Y-%m-%d")
         st.dataframe(
-            month_table[["txn_datetime", "txn_type", "card_name", "category", "description", "amount"]],
+            month_table[["txn_datetime", "txn_type", "card_name", "category", "Spend_Impact", "description", "amount"]],
             hide_index=True,
             height=520,
+            width="stretch",
+            column_config=transaction_column_config(),
         )

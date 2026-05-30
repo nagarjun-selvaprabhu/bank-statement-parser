@@ -1,14 +1,8 @@
 import argparse
 import os
 from dotenv import load_dotenv
-
-# Import your database saver (adjust this import to match your actual database script!)
 from database import save_transactions 
-
-# Import all your custom parsers
 from parsers import hdfc, icici, axis, sbi, idfc, au, hsbc
-
-# Silence pdfminer warnings
 import logging
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
@@ -42,6 +36,14 @@ def detect_bank_from_path(pdf_path):
             return bank_id
     return None
 
+def get_pdf_password(pdf_path, bank_id):
+    """Return the best matching statement password for a PDF."""
+    parts = [part.lower() for part in os.path.normpath(pdf_path).split(os.sep)]
+    if bank_id == "hdfc" and any("savings" in part for part in parts):
+        return os.getenv("HDFC_SAVINGS_PASS") or os.getenv("HDFC_PASS")
+
+    return os.getenv(f"{bank_id.upper()}_PASS")
+
 def process_pdf(pdf_path, bank_id):
     """Handles the extraction and saving of a single PDF."""
     parser = BANK_PARSERS.get(bank_id)
@@ -49,9 +51,7 @@ def process_pdf(pdf_path, bank_id):
         print(f"Error: No parser found for bank '{bank_id}'")
         return False
 
-    # Dynamically grab the password from .env (e.g., HDFC_PASS, ICICI_PASS)
-    env_password_key = f"{bank_id.upper()}_PASS"
-    password = os.getenv(env_password_key)
+    password = get_pdf_password(pdf_path, bank_id)
 
     try:
         transactions = parser.parse(pdf_path, password=password)

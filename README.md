@@ -63,6 +63,13 @@ AU_PASS=your_password
 HSBC_PASS=your_password
 ```
 
+Optional local-only category regexes can be added to `.env`. These patterns are matched against normalized lowercase transaction descriptions and can be separated with semicolons:
+
+```bash
+SELF_TRANSFER_PATTERNS="upi.*my own vpa"
+PERSONAL_TRANSFER_PATTERNS="family transfer marker"
+```
+
 ## Statement Folder Layout
 
 For automatic bank detection, place PDFs under bank-named folders:

@@ -50,7 +50,12 @@ def parse(pdf_path, password=None):
                     continue
                     
                 # Skip sub-headers injected inside the table
-                if "Card No:" in line or "Name" in line and "NAGARJUN" in line:
+                is_name_header = (
+                    re.search(r"\bName\b", line, flags=re.IGNORECASE)
+                    and not date_pattern.search(line)
+                    and not amount_pattern.search(line)
+                )
+                if "Card No:" in line or is_name_header:
                     continue
 
                 date_match = date_pattern.search(line)

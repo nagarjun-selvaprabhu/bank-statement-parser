@@ -1,8 +1,17 @@
 import argparse
+import os
 import re
 import sqlite3
 from collections import Counter
 from datetime import datetime
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+if load_dotenv:
+    load_dotenv()
 
 DB_FILE = "expenses.db"
 
@@ -35,7 +44,23 @@ def has_any(text, keywords):
 
 
 def has_regex(text, patterns):
-    return any(re.search(pattern, text) for pattern in patterns)
+    for pattern in patterns:
+        try:
+            if re.search(pattern, text):
+                return True
+        except re.error:
+            continue
+    return False
+
+
+def env_regex_patterns(name):
+    """Return optional local-only regexes from a semicolon or newline separated env var."""
+    raw_patterns = os.getenv(name, "")
+    return [
+        pattern.strip()
+        for pattern in re.split(r"[;\n]+", raw_patterns)
+        if pattern.strip() and not pattern.strip().startswith("#")
+    ]
 
 
 PAYMENT_KEYWORDS = [
@@ -45,8 +70,57 @@ PAYMENT_KEYWORDS = [
     "upi payment received", "cred visa direct", "billdesk cc payment",
 ]
 
+CREDIT_CARD_PAYMENT_KEYWORDS = [
+    "autopay thank you", "autopay returned", "payment received", "payment recieved",
+    "credit card payment", "bbps payment", "bbps pmt", "billdesk bbps cc payment",
+    "pymnt rcv", "online pymt", "mb ib payment", "cred visa direct",
+    "billdesk cc payment", "paymentoncred", "cred club", "credclub",
+    "cred club axisb", "cred club cred", "autopaysi", "cc0000",
+]
+
+INTERNAL_TRANSFER_KEYWORDS = [
+    "netbanking transfer", "imps pmt", "upi payment received",
+]
+
+SELF_TRANSFER_PATTERNS = [
+    r"\b(neft|neftcr|imps|impscr|rtgs|rtgscr|upi)\b.*\bself\b",
+    r"\bself\b.*\b(neft|neftcr|imps|impscr|rtgs|rtgscr|upi)\b",
+    r"\bown\s+account\b",
+]
+
+PERSONAL_TRANSFER_PATTERNS = []
+
+PF_WITHDRAWAL_KEYWORDS = [
+    "employeeprovident", "provident fund", "providentf und", "epfo",
+]
+
+TAX_REFUND_KEYWORDS = [
+    "itdtaxrefund", "tax refund", "income tax refund",
+]
+
+INCOME_KEYWORDS = [
+    "salary", "neftcr", "impscr", "rtgscr", "interest paid",
+]
+
+INTERNAL_CATEGORIES = {
+    "Credit Card Payments",
+    "Internal Transfers",
+    "Personal Transfers",
+    "Payments",
+}
+
+EARNING_CATEGORIES = {
+    "Income",
+    "PF Withdrawals",
+    "Tax Refunds",
+}
+
 REWARD_KEYWORDS = [
     "cashback", "surcharge waiver", "reward redemption", "reward points",
+]
+
+REFUND_KEYWORDS = [
+    "refund", "reversal", "reversed", "return",
 ]
 
 FEE_KEYWORDS = [
@@ -72,10 +146,8 @@ HEALTH_KEYWORDS = [
     "hospital", "medical", "medicals", "pharmacy", "pharma", "nursing",
     "clinic", "doctor", "tata1mg", "1mghealth", "apollo", "aakash",
     "stanley medical", "ent research", "dr kamakshi", "sujatha medicals",
-    "tamilnadu medicals", "hd proteins", "hd protiens", "proteins",
-    "optival health", "apoo hospitas", "apoo main hospita", "ahel hbp",
-    "med store", "dr agarwal", "health glow", "tata 1mg", "medplus",
-    "nahdi",
+    "tamilnadu medicals", "optival health", "apoo hospitas", "apoo main hospita", "ahel hbp",
+    "med store", "sugah healthcorp", "dr agarwal", "health glow", "tata 1mg", "medplus",
 ]
 
 PETS_KEYWORDS = [
@@ -121,8 +193,8 @@ FOOD_KEYWORDS = [
     "sri krishna sweets", "fig and focaccia", "ovenstory", "sardar refreshment",
     "atho ", "milkyway", "hotel parijatha", "ambur star", "bread basket",
     "tirunelveli parotta", "london waffle", "fruitbae", "eversub",
-    "shah ghouse", "al arabian", "sugah healthcorp",
-    "biriyani", "wallajah", "sree saravan", "liu s waldrof", "srinivasa dairy",
+    "shah ghouse", "al arabian", "biriyani", "wallajah", "sree saravan",
+    "liu s waldrof", "srinivasa dairy", "nahdi",
 ]
 
 GROCERY_KEYWORDS = [
@@ -134,7 +206,7 @@ GROCERY_KEYWORDS = [
     "kodai spices", "7 11", "reliance retai", "reiance retai",
     "retai cc", "innovativeretai", "5starssuper", "max hypermarket",
     "reliance fresh", "santhisuperstore", "kanan devan", "kdhp",
-    "blink commerce",
+    "blink commerce", "hd proteins", "hd protiens", "proteins",
 ]
 
 TRAVEL_KEYWORDS = [
@@ -242,10 +314,35 @@ def get_category(description, bank=None, card=None, txn_type=None, amount=None):
     if not desc:
         return "Uncategorized"
 
+    if has_any(desc, CREDIT_CARD_PAYMENT_KEYWORDS):
+        return "Credit Card Payments"
+    self_transfer_patterns = [
+        *SELF_TRANSFER_PATTERNS,
+        *env_regex_patterns("SELF_TRANSFER_PATTERNS"),
+    ]
+    personal_transfer_patterns = [
+        *PERSONAL_TRANSFER_PATTERNS,
+        *env_regex_patterns("PERSONAL_TRANSFER_PATTERNS"),
+    ]
+
+    if has_regex(desc, self_transfer_patterns):
+        return "Internal Transfers"
+    if txn_type == "CREDIT" and has_regex(desc, personal_transfer_patterns):
+        return "Personal Transfers"
+    if txn_type == "CREDIT" and has_any(desc, PF_WITHDRAWAL_KEYWORDS):
+        return "PF Withdrawals"
+    if txn_type == "CREDIT" and has_any(desc, TAX_REFUND_KEYWORDS):
+        return "Tax Refunds"
+    if txn_type == "CREDIT" and has_any(desc, INCOME_KEYWORDS):
+        return "Income"
+    if has_any(desc, INTERNAL_TRANSFER_KEYWORDS):
+        return "Internal Transfers"
     if has_any(desc, PAYMENT_KEYWORDS):
         return "Payments"
     if txn_type == "CREDIT" and has_any(desc, REWARD_KEYWORDS):
         return "Rewards & Cashback"
+    if txn_type == "CREDIT" and has_any(desc, REFUND_KEYWORDS):
+        return "Refunds & Reversals"
     if has_any(desc, FEE_KEYWORDS):
         return "Fees & Charges"
 
@@ -293,6 +390,10 @@ def get_category(description, bank=None, card=None, txn_type=None, amount=None):
         return "Refunds & Reversals"
 
     return "Miscellaneous"
+
+
+def is_internal_category(category):
+    return category in INTERNAL_CATEGORIES
 
 
 def update_transaction_categories(db_name=DB_FILE, dry_run=False):

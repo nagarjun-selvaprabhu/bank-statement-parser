@@ -15,8 +15,8 @@ def format_idfc_date(date_str):
 def parse(pdf_path, password=None):
     transactions = []
     
-    # STRICT: Line MUST start with DD MMM YY (e.g., "18 Apr 26")
-    date_pattern = re.compile(r"^\s*(\d{2}\s[a-zA-Z]{3}\s\d{2})")
+    # IDFC statements use both "18 Apr 26" and "18/04/2026" date formats.
+    date_pattern = re.compile(r"^\s*(\d{2}\s[a-zA-Z]{3}\s\d{2}|\d{2}/\d{2}/\d{2,4})")
     
     # Matches amounts ending in CR or DR (e.g., '11,361.00 DR')
     amount_pattern = re.compile(r"([\d,]+\.\d{2})\s*(CR|DR|Cr|Dr)")
